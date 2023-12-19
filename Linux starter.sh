@@ -1,3 +1,4 @@
+#!/bin/bash
 apt update && apt upgrade -y
 sudo updatedb && locate -e bench-repo
 
