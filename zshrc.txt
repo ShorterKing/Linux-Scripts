@@ -6,6 +6,10 @@ PROMPT="%F{red}┌[%f%F{cyan}%m%f%F{red}]─[%f%F{yellow}%D{%H:%M-%d/%m}%f%F{red
 # Export PATH$
 export PATH=~/.local/bin:/snap/bin:/usr/sandbox/:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/usr/share/games:/usr/local/sbin:/usr/sbin:/sbin:$PATH
 
+bindkey "^[[1;5D" backward-word
+bindkey "^[[1;5C" forward-word
+
+
 # alias
 alias ls='ls -lh --color=auto'
 alias dir='dir --color=auto'
