@@ -1,6 +1,5 @@
 # Greeting
-echo "Welcome to Parrot OS"
-
+echo "Welcome Akshat"
 # Prompt
 PROMPT="%F{red}┌[%f%F{cyan}%m%f%F{red}]─[%f%F{yellow}%D{%H:%M-%d/%m}%f%F{red}]─[%f%F{magenta}%d%f%F{red}]%f"$'\n'"%F{red}└╼%f%F{green}$USER%f%F{yellow}$%f"
 # Export PATH$
@@ -8,6 +7,12 @@ export PATH=~/.local/bin:/snap/bin:/usr/sandbox/:/usr/local/bin:/usr/bin:/bin:/u
 
 bindkey "^[[1;5D" backward-word
 bindkey "^[[1;5C" forward-word
+
+
+zle -N insert-unambiguous-or-complete
+zle -N menu-search
+zle -N recent-paths
+
 
 
 # alias
@@ -32,7 +37,7 @@ zstyle ':autocomplete:tab:*' widget-style menu-select
 zstyle ':autocomplete:*' min-input 2
 bindkey $key[Up] up-line-or-history
 bindkey $key[Down] down-line-or-history
-
+bindkey "^[[3;5~" kill-word
 
 ##################################################
 # Fish like syntax highlighting
