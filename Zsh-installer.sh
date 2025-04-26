@@ -3,8 +3,8 @@
 # Update the package list
 sudo apt update
 
-# Install zsh, zsh-autosuggestions, zsh-syntax-highlighting, and git
-sudo apt install -y zsh zsh-autosuggestions zsh-syntax-highlighting git
+# Install zsh, zsh-autosuggestions, zsh-syntax-highlighting, git, and dos2unix
+sudo apt install -y zsh zsh-autosuggestions zsh-syntax-highlighting git dos2unix
 
 # Clone zsh-autocomplete to /usr/share/zsh-autocomplete
 sudo git clone https://github.com/marlonrichert/zsh-autocomplete.git /usr/share/zsh-autocomplete
@@ -17,6 +17,9 @@ fi
 
 # Download the .zshrc file from the provided URL
 curl -o ~/.zshrc https://raw.githubusercontent.com/ShorterKing/Linux-Scripts/refs/heads/main/zshrc.txt
+
+# Convert .zshrc file from DOS to Unix format
+dos2unix ~/.zshrc
 
 # Inform the user
 echo "Zsh has been set up with the downloaded .zshrc."
