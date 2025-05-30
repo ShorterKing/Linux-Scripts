@@ -1,0 +1,7 @@
+mkdir -p ~/.config/pip
+nano ~/.config/pip/pip.conf
+
+[global]
+break-system-packages = true
+
+################For Python ##############
