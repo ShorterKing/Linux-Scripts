@@ -3,7 +3,7 @@
 # Check if domain name is provided as an argument
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <domain>"
-    echo "Example: $0 akshatcraft.ddns.net"
+    echo "Example: $0 whatever.ddns.net"
     exit 1
 fi
 
