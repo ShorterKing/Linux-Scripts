@@ -10,3 +10,6 @@ break-system-packages = true
 Install Dbus for python 
 
 pip3.10 install dbus-python==1.2.18
+
+
+pip3.10 install pygobject==3.42.2
