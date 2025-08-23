@@ -5,3 +5,8 @@ nano ~/.config/pip/pip.conf
 break-system-packages = true
 
 ################For Python ##############
+
+
+Install Dbus for python 
+
+pip3.10 install dbus-python==1.2.18
