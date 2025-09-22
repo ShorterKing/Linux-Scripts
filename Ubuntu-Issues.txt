@@ -1,0 +1,4 @@
+just install both of the following packages, and you got asleap
+
+https://old.kali.org/kali/pool/main/a/asleap/asleap_2.2-1kali7_amd64.deb
+https://debian.sipwise.com/debian-security/pool/main/o/openssl1.0/libssl1.0.2_1.0.2u-1~deb9u4_amd64.deb
