@@ -70,14 +70,70 @@ info "OS      : ${OS_PRETTY}"
 info "Arch    : ${ARCH}"
 info "Kernel  : $(uname -r)"
 
-# ── Sanity-check architecture ──────────────────────────────────
 case "$ARCH" in
   x86_64|aarch64|arm64|armv7l|armhf|s390x|ppc64le) ;;
   *) warn "Architecture '${ARCH}' may have limited Docker support." ;;
 esac
 
 # ==============================================================
-#  STEP 1 — Remove conflicting / old Docker packages
+#  STEP 1 — Fix any broken apt sources (Debian/Ubuntu only)
+#  Catches stale repos like Debian stretch that no longer have
+#  a Release file — these cause apt-get update to hard-fail.
+# ==============================================================
+fix_broken_apt_sources() {
+  step "Pre-checking apt sources for stale repositories"
+
+  # Run update, collect all output without failing the script
+  local update_out
+  update_out=$(apt-get update 2>&1 || true)
+
+  # Pull lines that mention a missing Release file
+  local bad_lines
+  bad_lines=$(echo "$update_out" | grep "does not have a Release file" || true)
+
+  if [[ -z "$bad_lines" ]]; then
+    success "All apt sources look healthy"
+    return
+  fi
+
+  warn "Stale/broken apt repositories found — disabling them:"
+
+  # Process each bad repo line
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    # Extract "URL codename" from: E: The repository 'URL codename Release' does not have...
+    local repo_spec
+    repo_spec=$(echo "$line" | sed "s/.*'\(.*\) Release'.*/\1/")
+    [[ -z "$repo_spec" ]] && continue
+
+    warn "  → ${repo_spec}"
+
+    # Escape special regex characters for use in sed
+    local escaped
+    escaped=$(printf '%s' "$repo_spec" | sed 's/[[\.*^$()+?{|]/\\&/g')
+
+    # Comment out every matching line in all .list files under /etc/apt
+    find /etc/apt -name "*.list" -type f | while IFS= read -r listfile; do
+      if grep -q "$escaped" "$listfile" 2>/dev/null; then
+        info "    Disabled in: $listfile"
+        # Prepend '# [STALE]: ' to each matching non-comment line
+        sed -i "/^[^#]*${escaped}/s|^|# [STALE REPO - DISABLED]: |" "$listfile"
+      fi
+    done
+  done <<< "$bad_lines"
+
+  # Wipe stale apt cache so the re-run starts clean
+  rm -rf /var/lib/apt/lists/*
+
+  success "Stale repos disabled — re-running apt-get update"
+  if ! apt-get update 2>&1; then
+    warn "apt-get update still reports issues — will attempt Docker install anyway"
+  fi
+}
+
+# ==============================================================
+#  STEP 2 — Remove conflicting / old Docker packages
 # ==============================================================
 remove_old_docker() {
   step "Removing old Docker packages (if any)"
@@ -115,11 +171,10 @@ remove_old_docker() {
 }
 
 # ==============================================================
-#  STEP 2 — Install Docker
+#  STEP 3 — Install Docker
 # ==============================================================
 
-# --- 2a. get.docker.com (works for Debian/Ubuntu/RHEL/Fedora/
-#         CentOS/Raspbian/Amazon Linux/SLES/openSUSE/…) ---------
+# --- 3a. get.docker.com (Debian/Ubuntu/RHEL/Fedora/Amazon/…) --
 install_via_get_script() {
   step "Fetching Docker's official install script (get.docker.com)"
   local script="/tmp/get-docker.sh"
@@ -138,7 +193,7 @@ install_via_get_script() {
   success "Docker installed via get.docker.com"
 }
 
-# --- 2b. Alpine (get.docker.com not supported) -----------------
+# --- 3b. Alpine -----------------------------------------------
 install_alpine() {
   step "Installing Docker on Alpine Linux"
   apk update
@@ -148,7 +203,7 @@ install_alpine() {
   success "Docker installed on Alpine"
 }
 
-# --- 2c. Arch / Manjaro / EndeavourOS -------------------------
+# --- 3c. Arch / Manjaro / EndeavourOS -------------------------
 install_arch() {
   step "Installing Docker on Arch Linux"
   pacman -Sy --noconfirm docker docker-compose
@@ -156,7 +211,7 @@ install_arch() {
   success "Docker installed on Arch"
 }
 
-# --- 2d. Void Linux -------------------------------------------
+# --- 3d. Void Linux -------------------------------------------
 install_void() {
   step "Installing Docker on Void Linux"
   xbps-install -Sy docker
@@ -164,7 +219,7 @@ install_void() {
   success "Docker installed on Void Linux"
 }
 
-# --- 2e. Gentoo -----------------------------------------------
+# --- 3e. Gentoo -----------------------------------------------
 install_gentoo() {
   step "Installing Docker on Gentoo"
   emerge --ask=n app-containers/docker app-containers/docker-cli
@@ -173,18 +228,18 @@ install_gentoo() {
 }
 
 # ==============================================================
-#  STEP 3 — Post-install setup
+#  STEP 4 — Post-install setup
 # ==============================================================
 post_install() {
   step "Running post-install setup"
 
   # Enable & start Docker service (systemd)
   if cmd_exists systemctl && systemctl list-units --type=service &>/dev/null; then
-    systemctl enable docker  2>/dev/null && success "Docker service enabled (systemd)"
-    systemctl start  docker  2>/dev/null && success "Docker service started"
+    systemctl enable docker 2>/dev/null && success "Docker service enabled (systemd)"
+    systemctl start  docker 2>/dev/null && success "Docker service started"
   fi
 
-  # Add the invoking user to the docker group so sudo isn't needed later
+  # Add the invoking user to the docker group
   REAL_USER="${SUDO_USER:-}"
   if [[ -n "$REAL_USER" && "$REAL_USER" != "root" ]]; then
     usermod -aG docker "$REAL_USER"
@@ -221,7 +276,7 @@ post_install() {
 }
 
 # ==============================================================
-#  STEP 4 — Verify
+#  STEP 5 — Verify
 # ==============================================================
 verify() {
   step "Verifying installation"
@@ -246,7 +301,7 @@ verify() {
   if docker run --rm hello-world 2>&1 | grep -q "Hello from Docker"; then
     success "hello-world container ran successfully ✓"
   else
-    warn "hello-world test failed. Docker may still work — run 'docker info' to check."
+    warn "hello-world test inconclusive. Run 'docker info' to check daemon status."
   fi
 }
 
@@ -254,28 +309,39 @@ verify() {
 #  MAIN
 # ==============================================================
 main() {
-  remove_old_docker
-
   case "$OS_ID" in
     alpine)
-      install_alpine ;;
+      remove_old_docker
+      install_alpine
+      ;;
     arch|manjaro|endeavouros|garuda|artix)
-      install_arch ;;
+      remove_old_docker
+      install_arch
+      ;;
     void)
-      install_void ;;
+      remove_old_docker
+      install_void
+      ;;
     gentoo)
-      install_gentoo ;;
+      remove_old_docker
+      install_gentoo
+      ;;
+    ubuntu|debian|raspbian|linuxmint|pop|kali|elementary|zorin)
+      # For Debian-family: sanitize apt sources FIRST, then install
+      fix_broken_apt_sources
+      remove_old_docker
+      install_via_get_script
+      ;;
     *)
-      # Handles: debian, ubuntu, raspbian, pop, kali, linuxmint,
-      #          centos, rhel, rocky, almalinux, ol, fedora,
-      #          opensuse-*, sles, amzn, and many others
-      install_via_get_script ;;
+      # RHEL, CentOS, Rocky, Alma, Fedora, openSUSE, Amazon Linux, etc.
+      remove_old_docker
+      install_via_get_script
+      ;;
   esac
 
   post_install
   verify
 
-  # ── Summary ────────────────────────────────────────────────
   echo
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${RESET}"
   echo -e "${BOLD}${GREEN}║        Docker is installed and ready!        ║${RESET}"
