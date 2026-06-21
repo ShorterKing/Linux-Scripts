@@ -76,59 +76,146 @@ case "$ARCH" in
 esac
 
 # ==============================================================
-#  STEP 1 — Fix any broken apt sources (Debian/Ubuntu only)
-#  Catches stale repos like Debian stretch that no longer have
-#  a Release file — these cause apt-get update to hard-fail.
+#  STEP 1 — Fix broken apt sources (Debian/Ubuntu family only)
+#
+#  Why two layers?
+#   Layer 1 (Python cleanup): permanently disables the stale
+#     entry in whatever file it lives in — handles both the old
+#     .list (single-line) format AND the new deb822 .sources
+#     (multi-line stanza) format that Ubuntu 22.04+ uses.
+#   Layer 2 (apt.conf override): sets APT::Update::Error-Mode
+#     "any" right before Docker's own get.docker.com script
+#     runs its `apt-get update`, so even if a stale entry slips
+#     through, it can no longer abort the install.
 # ==============================================================
 fix_broken_apt_sources() {
   step "Pre-checking apt sources for stale repositories"
 
-  # Run update, collect all output without failing the script
+  # First pass — collect any broken repos
   local update_out
   update_out=$(apt-get update 2>&1 || true)
 
-  # Pull lines that mention a missing Release file
-  local bad_lines
-  bad_lines=$(echo "$update_out" | grep "does not have a Release file" || true)
-
-  if [[ -z "$bad_lines" ]]; then
+  if ! echo "$update_out" | grep -q "does not have a Release file"; then
     success "All apt sources look healthy"
     return
   fi
 
-  warn "Stale/broken apt repositories found — disabling them:"
+  warn "Stale/broken apt repositories detected — running cleanup"
 
-  # Process each bad repo line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+  # Use Python so we can reliably handle BOTH formats:
+  #   .list  → each repo is a single "deb URL SUITE COMPONENTS" line
+  #   .sources → deb822 multi-line stanzas (URIs:, Suites: on separate lines)
+  python3 - "$update_out" << 'PYEOF'
+import sys, re, os, shutil
 
-    # Extract "URL codename" from: E: The repository 'URL codename Release' does not have...
-    local repo_spec
-    repo_spec=$(echo "$line" | sed "s/.*'\(.*\) Release'.*/\1/")
-    [[ -z "$repo_spec" ]] && continue
+raw_apt_out = sys.argv[1]
 
-    warn "  → ${repo_spec}"
+# ── Parse broken repos from apt output ─────────────────────────
+# Line format: E: The repository 'URL SUITE Release' does not have a Release file.
+broken = []
+for m in re.finditer(r"'([^']+)\s+Release'\s+does not have a Release file", raw_apt_out):
+    spec  = m.group(1).strip()
+    parts = spec.split(None, 1)
+    broken.append({
+        'url':   parts[0],
+        'suite': parts[1].strip() if len(parts) > 1 else ''
+    })
 
-    # Escape special regex characters for use in sed
-    local escaped
-    escaped=$(printf '%s' "$repo_spec" | sed 's/[[\.*^$()+?{|]/\\&/g')
+if not broken:
+    print("[INFO]  No broken repos found to fix.")
+    sys.exit(0)
 
-    # Comment out every matching line in all .list files under /etc/apt
-    find /etc/apt -name "*.list" -type f | while IFS= read -r listfile; do
-      if grep -q "$escaped" "$listfile" 2>/dev/null; then
-        info "    Disabled in: $listfile"
-        # Prepend '# [STALE]: ' to each matching non-comment line
-        sed -i "/^[^#]*${escaped}/s|^|# [STALE REPO - DISABLED]: |" "$listfile"
-      fi
-    done
-  done <<< "$bad_lines"
+for b in broken:
+    print(f"[WARN]    → {b['url']} {b['suite']}")
 
-  # Wipe stale apt cache so the re-run starts clean
+# ── Find every apt source file that references a broken URL ────
+apt_root = '/etc/apt'
+to_process = []
+for dirpath, _, files in os.walk(apt_root):
+    for fname in files:
+        if fname.endswith(('.list', '.sources')):
+            fpath = os.path.join(dirpath, fname)
+            try:
+                content = open(fpath).read()
+            except Exception:
+                continue
+            for b in broken:
+                if b['url'] in content:
+                    to_process.append(fpath)
+                    break
+
+if not to_process:
+    print("[WARN]  Could not locate source files — please check /etc/apt/ manually.")
+    sys.exit(0)
+
+# ── Patch each affected file ────────────────────────────────────
+TAG = "# [STALE REPO - DISABLED BY DOCKER INSTALLER]: "
+
+for fpath in to_process:
+    content = open(fpath).read()
+    new_content = content
+    changed = [False]
+
+    if fpath.endswith('.sources'):
+        # deb822 format: blank-line-separated stanzas
+        # We need to comment out any stanza whose URI + Suites match
+        def patch_stanza(stanza_text, broken_list):
+            lines = stanza_text.splitlines()
+            for b in broken_list:
+                has_url   = any(b['url']   in l for l in lines if not l.lstrip().startswith('#'))
+                has_suite = (not b['suite'] or
+                             any(b['suite'] in l for l in lines if not l.lstrip().startswith('#')))
+                if has_url and has_suite:
+                    changed[0] = True
+                    return '\n'.join(
+                        (TAG + l) if (l.strip() and not l.startswith('#')) else l
+                        for l in lines
+                    )
+            return stanza_text
+
+        # Split preserving the blank-line separators
+        parts = re.split(r'(\n{2,})', content)
+        new_parts = [patch_stanza(p, broken) if not re.fullmatch(r'\n+', p) else p
+                     for p in parts]
+        new_content = ''.join(new_parts)
+
+    else:
+        # Traditional .list format: one repo per uncommented line
+        out_lines = []
+        for line in content.splitlines(keepends=True):
+            stripped = line.rstrip('\n\r')
+            patched  = stripped
+            if not stripped.lstrip().startswith('#'):
+                for b in broken:
+                    if (b['url'] in stripped and
+                            (not b['suite'] or b['suite'] in stripped)):
+                        patched  = TAG + stripped
+                        changed[0]  = True
+                        break
+            out_lines.append(patched + '\n')
+        new_content = ''.join(out_lines)
+
+    if changed[0]:
+        backup = fpath + '.bak'
+        shutil.copy2(fpath, backup)
+        open(fpath, 'w').write(new_content)
+        print(f"[ OK ]  Disabled stale entry in: {fpath}  (backup → {backup})")
+    else:
+        print(f"[INFO]  No matching entry found in: {fpath}")
+
+print("[ OK ]  Python cleanup complete.")
+PYEOF
+
+  # Wipe stale apt cache so the next update is fully fresh
   rm -rf /var/lib/apt/lists/*
+  info "Re-running apt-get update to confirm..."
+  apt-get update 2>&1 | grep -E "^(E:|W:)" | grep -v "does not have a Release file" || true
 
-  success "Stale repos disabled — re-running apt-get update"
-  if ! apt-get update 2>&1; then
-    warn "apt-get update still reports issues — will attempt Docker install anyway"
+  if apt-get update -qq 2>&1 | grep -q "does not have a Release file"; then
+    warn "Some stale repos could not be auto-disabled."
+    warn "The install will proceed anyway (see Layer 2 below)."
+  else
+    success "Apt sources are clean"
   fi
 }
 
@@ -175,21 +262,40 @@ remove_old_docker() {
 # ==============================================================
 
 # --- 3a. get.docker.com (Debian/Ubuntu/RHEL/Fedora/Amazon/…) --
+#
+#  Layer 2 defence: inject APT::Update::Error-Mode "any" into
+#  a temporary apt config file before Docker's install script
+#  runs its own `apt-get update`.  This makes apt exit 0 even
+#  when some repos have errors — so a single stale third-party
+#  repo can never abort the whole Docker install.
+#  The config file is removed immediately after.
+# --------------------------------------------------------------
+APT_ERRMODE_CONF="/etc/apt/apt.conf.d/99-docker-install-errmode"
+
 install_via_get_script() {
   step "Fetching Docker's official install script (get.docker.com)"
-  local script="/tmp/get-docker.sh"
+  local dl_script="/tmp/get-docker.sh"
 
   if cmd_exists curl; then
-    curl -fsSL https://get.docker.com -o "$script"
+    curl -fsSL https://get.docker.com -o "$dl_script"
   elif cmd_exists wget; then
-    wget -qO "$script" https://get.docker.com
+    wget -qO "$dl_script" https://get.docker.com
   else
     error "Neither curl nor wget found. Install one and retry."
   fi
 
+  # Layer 2: make apt-get update non-fatal for repo errors
+  mkdir -p /etc/apt/apt.conf.d
+  echo 'APT::Update::Error-Mode "any";' > "$APT_ERRMODE_CONF"
+  info "Injected apt error-mode override (will be removed after install)"
+
   info "Executing installer…"
-  sh "$script"
-  rm -f "$script"
+  sh "$dl_script"
+  local rc=$?
+
+  rm -f "$dl_script" "$APT_ERRMODE_CONF"
+
+  [[ $rc -eq 0 ]] || error "get.docker.com install script exited with code $rc"
   success "Docker installed via get.docker.com"
 }
 
@@ -293,7 +399,7 @@ verify() {
     warn "Docker daemon doesn't seem to be running. Check: systemctl status docker"
   fi
 
-  if cmd_exists docker && docker compose version &>/dev/null 2>&1; then
+  if docker compose version &>/dev/null 2>&1; then
     success "Docker Compose: $(docker compose version)"
   fi
 
@@ -309,6 +415,9 @@ verify() {
 #  MAIN
 # ==============================================================
 main() {
+  # Ensure APT_ERRMODE_CONF is always cleaned up, even on error
+  trap 'rm -f "$APT_ERRMODE_CONF"' EXIT
+
   case "$OS_ID" in
     alpine)
       remove_old_docker
@@ -327,10 +436,9 @@ main() {
       install_gentoo
       ;;
     ubuntu|debian|raspbian|linuxmint|pop|kali|elementary|zorin)
-      # For Debian-family: sanitize apt sources FIRST, then install
-      fix_broken_apt_sources
+      fix_broken_apt_sources   # ← Layer 1: permanently patch source files
       remove_old_docker
-      install_via_get_script
+      install_via_get_script   # ← Layer 2: apt error-mode override inside here
       ;;
     *)
       # RHEL, CentOS, Rocky, Alma, Fedora, openSUSE, Amazon Linux, etc.
